@@ -1,0 +1,11 @@
+#summary 开发框架的架构
+
+= Introduction =
+
+根据不重复造轮子的思想和比较了一些框架之后选用了以下轮子
+
+ * web server lighttpd的scgi模式
+ * flup 和 scgi (处理lighttpd转发过来的请求给python处理)
+ * paste pastedeploy pastescript 来构建和处理任务 服务的设置 启动等等 
+ * webob 包装request 和response等对象
+ * jiaja2 做模板引擎

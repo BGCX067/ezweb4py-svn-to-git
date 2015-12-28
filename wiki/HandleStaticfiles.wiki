@@ -1,0 +1,294 @@
+= 静态文件的处理 =
+
+先来看看tg2和pylons的处理 
+
+tg2基于pylons
+
+pylons基于paster
+
+=== 看代码 ===
+
+==== development.ini ====
+{{{
+[app:main]
+use = egg:testtg
+full_stack = true
+#lang = ru
+cache_dir = %(here)s/data
+beaker.session.key = testtg
+beaker.session.secret = somesecret
+}}}
+
+
+==== setup.py ====
+{{{
+entry_points="""
+    [paste.app_factory]
+    main = testtg.config.middleware:make_app
+
+    [paste.app_install]
+    main = pylons.util:PylonsInstaller
+    """,
+}}}
+
+那么paster启动的时候回去找一个app 这个app指向了
+
+==== middleware.py ====
+{{{
+from testtg.config.app_cfg import base_config
+from testtg.config.environment import load_environment
+
+
+__all__ = ['make_app']
+
+# Use base_config to setup the necessary PasteDeploy application factory. 
+# make_base_app will wrap the TG2 app with all the middleware it needs. 
+make_base_app = base_config.setup_tg_wsgi_app(load_environment)
+
+
+def make_app(global_conf, full_stack=True, **app_conf):
+    """
+    """
+    app = make_base_app(global_conf, full_stack=True, **app_conf)
+    
+    # Wrap your base TurboGears 2 application with custom middleware here
+    
+    return app
+}}}
+
+最终返回的是一个base_config.setup_tg_wsgi_app(load_environment)
+
+看app_cfg.py发现就是定义了一些常量
+其中
+
+==== app_cfg.py ====
+{{{
+from tg.configuration import AppConfig
+base_config = AppConfig()
+}}}
+
+也就是实际上返回的是一个AppConfig
+
+来看!AppConfig
+
+这个类太长了 具体查看源代码configuration.py
+
+==== configuration.py ====
+{{{
+...
+...
+class AppConfig(Bunch):
+......
+    def setup_tg_wsgi_app(self, load_environment):
+        """Create a base TG app, with all the standard middleware.
+
+        ``load_environment``
+            A required callable, which sets up the basic evironment
+            needed for the application.
+        ``setup_vars``
+            A dictionary with all special values necessary for setting up
+            the base wsgi app.
+
+        """
+
+        def make_base_app(global_conf, wrap_app=None, full_stack=True, **app_conf):
+            """Create a tg WSGI application and return it.
+
+            ``wrap_app``
+                a WSGI middleware component which takes the core turbogears
+                application and wraps it -- inside all the WSGI-components
+                provided by TG and Pylons. This allows you to work with the
+                full environment that your TG application would get before
+                anything happens in the application itself.
+
+            ``global_conf``
+                The inherited configuration for this application. Normally
+                from the [DEFAULT] section of the Paste ini file.
+
+            ``full_stack``
+                Whether or not this application provides a full WSGI stack (by
+                default, meaning it handles its own exceptions and errors).
+                Disable full_stack when this application is "managed" by
+                another WSGI middleware.
+
+            ``app_conf``
+                The application's local configuration. Normally specified in
+                the [app:<name>] section of the Paste ini file (where <name>
+                defaults to main).
+
+            """
+            # Configure the Pylons environment
+            load_environment(global_conf, app_conf)
+            app = TGApp()
+            if wrap_app:
+                app = wrap_app(app)
+            app = self.add_core_middleware(app)
+
+            if self.use_toscawidgets:
+                app = self.add_tosca_middleware(app)
+
+            if self.auth_backend == "sqlalchemy":
+                # Skipping authentication if explicitly requested. Used by 
+                # repoze.who-testutil:
+                skip_authentication = app_conf.get('skip_authentication')
+                app = self.add_auth_middleware(app, skip_authentication)
+
+            if self.use_transaction_manager:
+                app = self.add_tm_middleware(app)
+
+            if self.use_sqlalchemy:
+                if not hasattr(self, 'DBSession'):
+                    # If the user hasn't specified a scoped_session, assume
+                    # he/she uses the default DBSession in model
+                    self.DBSession = self.model.DBSession
+                app = self.add_dbsession_remover_middleware(app)
+
+            app = maybe_make_body_seekable(app)
+
+
+            if asbool(full_stack):
+                if (self.auth_backend is None
+                        and 401 not in self.handle_status_codes):
+                    # If there's no auth backend configured which traps 401
+                    # responses we redirect those responses to a nicely
+                    # formatted error page
+                    self.handle_status_codes.append(401)
+                # This should nevery be true for internal nested apps
+                app = self.add_error_middleware(global_conf, app)
+
+            # Establish the registry for this application
+            app = RegistryManager(app)
+
+            # Static files (if running in production, and Apache or another
+            # web server is serving static files)
+            if self.serve_static:
+                app = self.add_static_file_middleware(app)
+
+            return app
+
+        return make_base_app
+}}}
+
+
+这时再回到前面
+{{{
+make_base_app = base_config.setup_tg_wsgi_app(load_environment)
+}}}
+make_base_app指的就是
+{{{
+def make_base_app(global_conf, wrap_app=None, full_stack=True, **app_conf):
+}}}
+这个方法
+那么
+{{{
+app = make_base_app(global_conf, full_stack=True, **app_conf)
+}}}
+也就返回了一个def make_base_app(global_conf, wrap_app=None, full_stack=True, **app_conf):所构造的app
+所以核心的内容在!AppConfig的make_base_app这个方法 最终app是这里生产出来的
+
+这里面有一段
+{{{
+if self.serve_static:
+    app = self.add_static_file_middleware(app)
+}}}
+
+
+来看这个方法
+{{{
+......
+    def add_static_file_middleware(self, app):
+        static_app = StaticURLParser(config['pylons.paths']['static_files'])
+        app = Cascade([static_app, app])
+        return app
+......
+}}}
+
+解释Cascade
+
+Cascade是paste的
+
+paste的api做了如下解释
+
+{{{
+class paste.cascade.Cascade(applications, catch=(404, ))¶
+
+    Passed a list of applications, Cascade will try each of them in turn. If one returns a status code listed in catch (by default just 404 Not Found) then the next application is tried.
+
+    If all applications fail, then the last application’s failure response is used.
+
+    Instances of this class are WSGI applications.
+
+}}}
+
+也就是说Cascade是一个处理app的扩展类构造的时候可以传入一个包含标准的wsgi的app 的list (注意是list)
+处理的时候如果一个返回404就接着调用下一个app来处理直到没有返回404
+
+如果前面都失败了  那么返回的是最后一个的response
+
+顺便看看Cascade的核心方法
+
+{{{
+......
+    def __call__(self, environ, start_response):
+        """
+        WSGI application interface
+        """
+        failed = []
+        def repl_start_response(status, headers, exc_info=None):
+            code = int(status.split(None, 1)[0])
+            if code in self.catch_codes:
+                failed.append(None)
+                return _consuming_writer
+            return start_response(status, headers, exc_info)
+
+        try:
+            length = int(environ.get('CONTENT_LENGTH', 0) or 0)
+        except ValueError:
+            length = 0
+        if length > 0:
+            # We have to copy wsgi.input
+            copy_wsgi_input = True
+            if length > 4096 or length < 0:
+                f = tempfile.TemporaryFile()
+                if length < 0:
+                    f.write(environ['wsgi.input'].read())
+                else:
+                    copy_len = length
+                    while copy_len > 0:
+                        chunk = environ['wsgi.input'].read(min(copy_len, 4096))
+                        if not chunk:
+                            raise IOError("Request body truncated")
+                        f.write(chunk)
+                        copy_len -= len(chunk)
+                f.seek(0)
+            else:
+                f = StringIO(environ['wsgi.input'].read(length))
+            environ['wsgi.input'] = f
+        else:
+            copy_wsgi_input = False
+        for app in self.apps[:-1]:
+            environ_copy = environ.copy()
+            if copy_wsgi_input:
+                environ_copy['wsgi.input'].seek(0)
+            failed = []
+            try:
+                v = app(environ_copy, repl_start_response)
+                if not failed:
+                    return v
+                else:
+                    if hasattr(v, 'close'):
+                        # Exhaust the iterator first:
+                        list(v)
+                        # then close:
+                        v.close()
+            except self.catch_exceptions, e:
+                pass
+        if copy_wsgi_input:
+            environ['wsgi.input'].seek(0)
+        return self.apps[-1](environ, start_response)
+
+......
+}}}
+
+def repl_start_response(status, headers, exc_info=None):
+这个方法先不管 往下看
